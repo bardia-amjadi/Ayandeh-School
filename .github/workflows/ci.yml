@@ -1,0 +1,108 @@
+name: CI
+on:
+  push: { branches: [main], tags: ["v*.*.*"] }
+  pull_request:
+permissions: { contents: read }
+concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Prisma generate
+        run: npx prisma generate --schema apps/api/prisma/schema.prisma
+      - name: Migrations apply cleanly and match schema (no drift)
+        run: |
+          test -d apps/api/prisma/migrations || { echo "::error::No committed migrations. Run the 'Generate Prisma migration' workflow (Actions tab) on this branch, then re-run CI."; exit 1; }
+          npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
+          npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel apps/api/prisma/schema.prisma --exit-code
+      - run: npm run typecheck
+      - name: Unit + end-to-end tests (e2e runs against the Postgres service)
+        run: npm test
+        env:
+          NODE_ENV: test
+      - run: npm run build
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production compose
+        run: |
+          cp .env.example .env
+          docker compose -f deploy/docker-compose.prod.yml config -q
+      - name: Fail if secrets-looking files are committed
+        run: "! git ls-files | grep -E '(^|/)\\.env($|\\.[^e])'"
+
+  smoke:
+    # Real Docker stack: build, migrate, bootstrap, persistence across recreation, backup -> restore.
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare throw-away environment (no real secrets)
+        run: |
+          cp .env.example .env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=smoke_only_password/; s/^COOKIE_SECURE=.*/COOKIE_SECURE=false/' .env
+      - run: ./scripts/smoke.sh
+      - if: failure()
+        run: docker compose logs --tail=200
+
+  images:
+    needs: [verify, compose-config, smoke]
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    strategy:
+      matrix:
+        include:
+          - { name: api, dockerfile: apps/api/Dockerfile }
+          - { name: web, dockerfile: apps/web/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ayandeh-school-${{ matrix.name }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  release-assets:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [images]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish deploy bundle (compose + env template, no secrets)
+        uses: softprops/action-gh-release@v2
+        with: { files: "deploy/docker-compose.prod.yml\n.env.example" }
