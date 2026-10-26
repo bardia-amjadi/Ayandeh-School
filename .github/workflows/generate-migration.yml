@@ -1,0 +1,36 @@
+# Manual workflow: generates the initial Prisma migration SQL with Prisma's own tooling on a GitHub-hosted runner
+# and commits it to the branch you run it on. Run this ONCE (and again after any schema change).
+name: Generate Prisma migration
+on:
+  workflow_dispatch:
+    inputs:
+      name: { description: "Migration name", default: "init", required: true }
+permissions: { contents: write }
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    env: { DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Apply existing migrations (if any), then create the next one from the schema diff
+        run: |
+          S=apps/api/prisma/schema.prisma
+          if [ -d apps/api/prisma/migrations ]; then npx prisma migrate deploy --schema $S; fi
+          npx prisma migrate dev --create-only --name "${{ inputs.name }}" --skip-seed --schema $S
+      - name: Commit migration
+        run: |
+          git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api/prisma/migrations
+          git diff --cached --quiet && { echo "No schema changes to migrate."; exit 0; }
+          git commit -m "chore(db): add prisma migration ${{ inputs.name }}"
+          git push
