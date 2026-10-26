@@ -1,0 +1,463 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role { SUPER_ADMIN ADMIN DEPUTY TEACHER STUDENT }
+enum PostStatus { DRAFT PUBLISHED }
+enum TicketStatus { OPEN CLOSED }
+enum AudienceType { ALL CLASSES }
+enum ResourceScope { GENERAL CLASS }
+
+model User {
+  id                 String   @id @default(uuid())
+  username           String   @unique
+  email              String?  @unique
+  passwordHash       String
+  role               Role
+  active             Boolean  @default(true)
+  mustChangePassword Boolean  @default(false)
+  firstName          String
+  lastName           String
+  phone              String?
+  identifier         String?  @unique // student / teacher number
+  avatarFileId       String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  sessions       Session[]
+  resetTokens    PasswordResetToken[]
+  enrollments    Enrollment[]
+  teaching       ClassSubject[]
+  grades         GradeRecord[]   @relation("GradeStudent")
+  gradesEntered  GradeRecord[]   @relation("GradeEnteredBy")
+  charges        StudentCharge[]
+  payments       Payment[]       @relation("PaymentStudent")
+  paymentsMade   Payment[]       @relation("PaymentRecordedBy")
+  tickets        Ticket[]
+  ticketMessages TicketMessage[]
+  pushSubs       PushSubscription[]
+  prefs          NotificationPreference?
+  posts          Post[]
+  sessionsOwned  OnlineSession[]
+  auditLogs      AuditLog[]
+  announcementReads AnnouncementRead[]
+
+  @@index([role, active])
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  csrfToken String
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip        String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DeputyPermission {
+  permission String  @id
+  enabled    Boolean @default(false)
+}
+
+model SystemSetting {
+  key   String @id
+  value Json
+}
+
+model AcademicYear {
+  id        String   @id @default(uuid())
+  title     String   @unique // e.g. 1405-1406
+  startDate DateTime
+  endDate   DateTime
+  isCurrent Boolean  @default(false)
+  classes   SchoolClass[]
+  enrollments Enrollment[]
+  items     FinancialItem[]
+}
+
+model GradeLevel {
+  id      String @id @default(uuid())
+  title   String @unique
+  order   Int    @default(0)
+  classes SchoolClass[]
+  resources Resource[]
+}
+
+model SchoolClass {
+  id             String   @id @default(uuid())
+  name           String
+  academicYearId String
+  gradeLevelId   String
+  archived       Boolean  @default(false)
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  gradeLevel     GradeLevel   @relation(fields: [gradeLevelId], references: [id])
+  subjects       ClassSubject[]
+  enrollments    Enrollment[]
+  timetable      TimetableEntry[]
+  exams          Exam[]
+  grades         GradeRecord[]
+  sessions       OnlineSession[]
+  resources      Resource[]
+  announcements  AnnouncementClass[]
+  @@unique([academicYearId, name])
+}
+
+model Subject {
+  id    String @id @default(uuid())
+  title String @unique
+  classSubjects ClassSubject[]
+  grades GradeRecord[]
+  resources Resource[]
+}
+
+model ClassSubject {
+  id        String  @id @default(uuid())
+  classId   String
+  subjectId String
+  teacherId String?
+  class     SchoolClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject   Subject     @relation(fields: [subjectId], references: [id])
+  teacher   User?       @relation(fields: [teacherId], references: [id])
+  timetable TimetableEntry[]
+  exams     Exam[]
+  @@unique([classId, subjectId])
+  @@index([teacherId])
+}
+
+model Enrollment {
+  id             String   @id @default(uuid())
+  studentId      String
+  classId        String
+  academicYearId String
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  student        User         @relation(fields: [studentId], references: [id])
+  class          SchoolClass  @relation(fields: [classId], references: [id])
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  @@unique([studentId, academicYearId])
+  @@index([classId])
+}
+
+model TimetableEntry {
+  id             String   @id @default(uuid())
+  classSubjectId String
+  classId        String
+  teacherId      String?
+  weekday        Int      // 0 = Saturday .. 6 = Friday
+  startMinute    Int
+  endMinute      Int
+  room           String?
+  classSubject   ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+  class          SchoolClass  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  @@index([classId, weekday])
+  @@index([teacherId, weekday])
+}
+
+model Exam {
+  id             String   @id @default(uuid())
+  classSubjectId String
+  classId        String
+  teacherId      String?
+  title          String
+  startsAt       DateTime
+  endsAt         DateTime
+  classSubject   ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+  class          SchoolClass  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  @@index([classId, startsAt])
+  @@index([teacherId, startsAt])
+}
+
+model GradeRecord {
+  id           String   @id @default(uuid())
+  studentId    String
+  classId      String
+  subjectId    String
+  term         Int      @default(1)
+  title        String
+  score        Decimal  @db.Decimal(6, 2)
+  maxScore     Decimal  @db.Decimal(6, 2)
+  date         DateTime
+  enteredById  String
+  published    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  student      User        @relation("GradeStudent", fields: [studentId], references: [id])
+  enteredBy    User        @relation("GradeEnteredBy", fields: [enteredById], references: [id])
+  class        SchoolClass @relation(fields: [classId], references: [id])
+  subject      Subject     @relation(fields: [subjectId], references: [id])
+  @@index([studentId, published])
+  @@index([classId, subjectId])
+}
+
+model FinancialItem {
+  id             String   @id @default(uuid())
+  title          String
+  description    String?
+  amount         Decimal  @db.Decimal(14, 0)
+  academicYearId String
+  dueDate        DateTime?
+  installments   Int      @default(1)
+  archived       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  charges        StudentCharge[]
+}
+
+model StudentCharge {
+  id         String   @id @default(uuid())
+  studentId  String
+  itemId     String
+  amount     Decimal  @db.Decimal(14, 0) // snapshot of item price
+  discount   Decimal  @default(0) @db.Decimal(14, 0)
+  discountNote String?
+  voidedAt   DateTime?
+  createdAt  DateTime @default(now())
+  student    User          @relation(fields: [studentId], references: [id])
+  item       FinancialItem @relation(fields: [itemId], references: [id])
+  installments Installment[]
+  payments   Payment[]
+  @@unique([studentId, itemId])
+}
+
+model Installment {
+  id       String   @id @default(uuid())
+  chargeId String
+  seq      Int
+  amount   Decimal  @db.Decimal(14, 0)
+  dueDate  DateTime
+  charge   StudentCharge @relation(fields: [chargeId], references: [id], onDelete: Cascade)
+  @@unique([chargeId, seq])
+}
+
+model Payment {
+  id             String   @id @default(uuid())
+  chargeId       String
+  studentId      String
+  amount         Decimal  @db.Decimal(14, 0)
+  paidAt         DateTime
+  method         String   // cash, bank-transfer, ...
+  reference      String?
+  idempotencyKey String   @unique
+  recordedById   String
+  voidedAt       DateTime?
+  voidReason     String?
+  createdAt      DateTime @default(now())
+  charge         StudentCharge @relation(fields: [chargeId], references: [id])
+  student        User @relation("PaymentStudent", fields: [studentId], references: [id])
+  recordedBy     User @relation("PaymentRecordedBy", fields: [recordedById], references: [id])
+  @@index([studentId])
+}
+
+model FileAsset {
+  id           String   @id @default(uuid())
+  storageName  String   @unique // safe server-side name
+  originalName String
+  mimeType     String
+  size         Int
+  sha256       String
+  uploadedById String
+  isPublic     Boolean  @default(false) // only images attached to published posts/pages may be public
+  createdAt    DateTime @default(now())
+  posts        Post[]
+  resources    Resource[]
+}
+
+model Category {
+  id    String @id @default(uuid())
+  title String @unique
+  slug  String @unique
+  posts Post[]
+}
+
+model Tag {
+  id    String @id @default(uuid())
+  title String @unique
+  posts PostTag[]
+}
+
+model Post {
+  id          String     @id @default(uuid())
+  title       String
+  slug        String     @unique
+  markdown    String
+  status      PostStatus @default(DRAFT)
+  authorId    String
+  categoryId  String?
+  featuredId  String?
+  videoUrl    String?
+  publishedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  author      User       @relation(fields: [authorId], references: [id])
+  category    Category?  @relation(fields: [categoryId], references: [id])
+  featured    FileAsset? @relation(fields: [featuredId], references: [id])
+  tags        PostTag[]
+  @@index([status, publishedAt])
+}
+
+model PostTag {
+  postId String
+  tagId  String
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag    Tag  @relation(fields: [tagId], references: [id])
+  @@id([postId, tagId])
+}
+
+model Resource {
+  id           String        @id @default(uuid())
+  title        String
+  description  String?
+  type         String
+  scope        ResourceScope @default(GENERAL)
+  subjectId    String?
+  gradeLevelId String?
+  classId      String?
+  fileId       String
+  creatorId    String
+  createdAt    DateTime      @default(now())
+  subject      Subject?      @relation(fields: [subjectId], references: [id])
+  gradeLevel   GradeLevel?   @relation(fields: [gradeLevelId], references: [id])
+  class        SchoolClass?  @relation(fields: [classId], references: [id])
+  file         FileAsset     @relation(fields: [fileId], references: [id])
+}
+
+model OnlineSession {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  classId     String
+  subjectId   String?
+  startsAt    DateTime
+  endsAt      DateTime
+  url         String
+  creatorId   String
+  published   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  class       SchoolClass @relation(fields: [classId], references: [id])
+  creator     User        @relation(fields: [creatorId], references: [id])
+  @@index([classId, startsAt])
+}
+
+model Announcement {
+  id          String       @id @default(uuid())
+  title       String
+  body        String
+  audience    AudienceType @default(ALL)
+  published   Boolean      @default(false)
+  publishAt   DateTime?
+  expiresAt   DateTime?
+  creatorId   String
+  createdAt   DateTime     @default(now())
+  classes     AnnouncementClass[]
+  reads       AnnouncementRead[]
+}
+
+model AnnouncementRead {
+  announcementId String
+  userId         String
+  readAt         DateTime @default(now())
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([announcementId, userId])
+}
+
+model AnnouncementClass {
+  announcementId String
+  classId        String
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  class          SchoolClass  @relation(fields: [classId], references: [id])
+  @@id([announcementId, classId])
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model NotificationPreference {
+  userId        String  @id
+  announcements Boolean @default(true)
+  grades        Boolean @default(true)
+  sessions      Boolean @default(true)
+  tickets       Boolean @default(true)
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Ticket {
+  id        String       @id @default(uuid())
+  studentId String
+  subject   String
+  status    TicketStatus @default(OPEN)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  student   User         @relation(fields: [studentId], references: [id])
+  messages  TicketMessage[]
+  @@index([studentId])
+  @@index([status])
+}
+
+model TicketMessage {
+  id        String   @id @default(uuid())
+  ticketId  String
+  authorId  String
+  body      String
+  createdAt DateTime @default(now())
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author    User     @relation(fields: [authorId], references: [id])
+}
+
+model CustomPage {
+  id          String   @id @default(uuid())
+  title       String
+  slug        String   @unique
+  markdown    String
+  published   Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+}
+
+model PublicSetting {
+  key   String @id // about, contact, school-info
+  value Json
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  meta      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+  actor     User?    @relation(fields: [actorId], references: [id])
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
